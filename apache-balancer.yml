@@ -1,0 +1,418 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 9aa1b03934894d71b4a660af4204f2a9
+      name: Server
+  templates:
+    - uuid: 192c826576f74673826e581b2b081312
+      template: 'Apache Balancer'
+      name: 'Apache Balancer'
+      groups:
+        - name: Server
+      items:
+        - uuid: 41e2fcda528d4a198488d6989926af40
+          name: 'Parse html to json'
+          type: DEPENDENT
+          key: apache.balancer.parsed
+          delay: '0'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Parsing HTML data to json format.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  function parseBalancerManager(html) {
+                      var result = [];
+                  
+                      // find each balancer section by regex
+                      // get balancer name (after "balancer://") and the rest of the content ultil next <h3> (or end)
+                      var sectionRegex = /<h3>[\s\S]*?<a [^>]*>balancer:\/\/([^<]+)<\/a>[\s\S]*?<\/h3>([\s\S]*?)(?=<h3>|$)/gi;
+                      var sectionMatch;
+                      
+                      while ((sectionMatch = sectionRegex.exec(html)) !== null) {
+                          var balancerName = sectionMatch[1].trim();
+                          var sectionContent = sectionMatch[2];
+                  
+                          // find all tables in section
+                          var tableMatches = sectionContent.match(/<table[\s\S]*?<\/table>/gi);
+                          if (!tableMatches || tableMatches.length < 2) {
+                              continue; // se non c'è il tavolo dei worker, salta la sezione.
+                          }
+                          
+                          // the second table as the workers
+                          var workerTable = tableMatches[1];
+                          
+                          // find all tables rows
+                          var rowMatches = workerTable.match(/<tr[\s\S]*?<\/tr>/gi);
+                          if (!rowMatches || rowMatches.length < 2) {
+                              continue; // if no rows or headers, skip
+                          }
+                          
+                          // skip first row, headers
+                          for (var i = 1; i < rowMatches.length; i++) {
+                              // find all cells (<td> o <th>) in the row.
+                              var cellMatches = rowMatches[i].match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi);
+                              if (!cellMatches || cellMatches.length < 9) {
+                                  continue; // ensure the minimum column
+                              }
+                              
+                              // clean cell content removing HTML tags
+                              var cells = cellMatches.map(function(cell) {
+                                  return cell.replace(/<[^>]*>/g, '').trim();
+                              });
+                              
+                              result.push({
+                                  "balancer": balancerName,
+                                  "worker": cells[0],
+                                  "route": cells[1],
+                                  "status": cells[5],
+                                  "busy": cells[7],
+                                  "load": cells[8]
+                              });
+                          }
+                      }
+                      
+                      return JSON.stringify({ "data": result }, null, 4);
+                  }
+                  
+                  // 'value' is the variable with the HTML returned by the host
+                  return parseBalancerManager(value);
+                  
+          master_item:
+            key: 'web.page.get[{$APACHE.BALANCER.HOST},{$APACHE.BALANCER.PATH},{$APACHE.BALANCER.PORT}]'
+          tags:
+            - tag: component
+              value: apache
+            - tag: component
+              value: raw
+        - uuid: c22c90d8eaa144ec8afedb062f5a067a
+          name: 'Balancer http status code'
+          type: DEPENDENT
+          key: apache.balancer.response.code
+          delay: '0'
+          history: 1d
+          trends: '0'
+          description: 'HTTP response code'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  function parseBalancerStatus(html) {
+                      var firstLine = html.split("\r\n")[0];
+                  
+                      // Se non è una linea valida, fallback a 0
+                      if (!firstLine || !firstLine.match(/^HTTP\/\d\.\d\s\d+/)) {
+                          return 0;
+                      }
+                  
+                      var code = firstLine.replace(/^HTTP\/\d\.\d\s/, "").replace(/\s.+$/, "");
+                  
+                      var num = Number(code);
+                      if (isNaN(num)) {
+                          return 0;
+                      }
+                  
+                      return num;
+                  }
+                  
+                  return parseBalancerStatus(value);
+          master_item:
+            key: 'web.page.get[{$APACHE.BALANCER.HOST},{$APACHE.BALANCER.PATH},{$APACHE.BALANCER.PORT}]'
+          tags:
+            - tag: component
+              value: apache
+          triggers:
+            - uuid: 29f87020a7b04965b64989ee32f47cab
+              expression: 'last(/Apache Balancer/apache.balancer.response.code,#3)<>200'
+              name: 'Balancer http code not 200'
+              priority: WARNING
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 06fd1835fd654f9893e60e6c51c196c7
+          name: 'Balancer html length'
+          type: DEPENDENT
+          key: apache.balancer.response.length
+          delay: '0'
+          history: 1d
+          trends: '0'
+          description: 'Length of HTML returned'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value.length;'
+          master_item:
+            key: 'web.page.get[{$APACHE.BALANCER.HOST},{$APACHE.BALANCER.PATH},{$APACHE.BALANCER.PORT}]'
+          tags:
+            - tag: component
+              value: apache
+          triggers:
+            - uuid: be5f6db445f748308fc68b9f1ec48704
+              expression: 'last(/Apache Balancer/apache.balancer.response.length,#3)=0'
+              name: 'Balancer html length is 0'
+              priority: WARNING
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 83e4733c84584921a90adf972151a049
+          name: 'Get balancer status'
+          key: 'web.page.get[{$APACHE.BALANCER.HOST},{$APACHE.BALANCER.PATH},{$APACHE.BALANCER.PORT}]'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Getting HTML from Apache Balancer page.'
+          tags:
+            - tag: component
+              value: apache
+            - tag: component
+              value: raw
+      discovery_rules:
+        - uuid: e06498d663d1433fb1ec674b720c1e0d
+          name: 'Discover Apache Balancer Workers'
+          type: DEPENDENT
+          key: apache.balancer.discovery
+          delay: '0'
+          item_prototypes:
+            - uuid: 692d588beef04035b4e8294137fb74e8
+              name: 'Worker {#BALANCER}::{#ROUTE} busy'
+              type: DEPENDENT
+              key: 'apache.worker.busy[{#BALANCER},{#ROUTE}]'
+              delay: '0'
+              description: 'Worker: {#WORKER}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.balancer=="{#BALANCER}" && @.worker=="{#WORKER}")].busy'
+                - type: JSONPATH
+                  parameters:
+                    - '$[0]'
+              master_item:
+                key: apache.balancer.parsed
+              tags:
+                - tag: balancer
+                  value: '{#BALANCER}'
+                - tag: component
+                  value: apache
+                - tag: component
+                  value: worker
+              trigger_prototypes:
+                - uuid: d7f9fc70b9f34072b405e96433ffffbb
+                  expression: 'avg(/Apache Balancer/apache.worker.busy[{#BALANCER},{#ROUTE}],3m)>{$APACHE.BALANCER.BUSY}'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'avg(/Apache Balancer/apache.worker.busy[{#BALANCER},{#ROUTE}],2m)<{$APACHE.BALANCER.BUSY}*0.8'
+                  name: '{#BALANCER} route {#ROUTE} too busy'
+                  priority: WARNING
+                  tags:
+                    - tag: scope
+                      value: performance
+            - uuid: 058face8fcbd4fbd87c08fdecbb48579
+              name: 'Worker {#BALANCER}::{#ROUTE} load'
+              type: DEPENDENT
+              key: 'apache.worker.load[{#BALANCER},{#ROUTE}]'
+              delay: '0'
+              value_type: FLOAT
+              description: 'Worker: {#WORKER}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.balancer=="{#BALANCER}" && @.worker=="{#WORKER}")].load'
+                - type: JSONPATH
+                  parameters:
+                    - '$[0]'
+              master_item:
+                key: apache.balancer.parsed
+              tags:
+                - tag: balancer
+                  value: '{#BALANCER}'
+                - tag: component
+                  value: apache
+                - tag: component
+                  value: worker
+            - uuid: 45ff0b8a34a140b5b742718d48788b85
+              name: 'Worker {#BALANCER}::{#ROUTE} status'
+              type: DEPENDENT
+              key: 'apache.worker.status[{#BALANCER},{#ROUTE}]'
+              delay: '0'
+              description: 'Worker: {#WORKER}'
+              valuemap:
+                name: 'Apache Worker Status'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.balancer=="{#BALANCER}" && @.worker=="{#WORKER}")].status'
+                - type: JSONPATH
+                  parameters:
+                    - '$[0]'
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      function mapStatusToNumber(status) {
+                          if (status.includes("Err")) return 8;
+                          if (status.includes("Sick")) return 7;
+                          if (status.includes("Stop")) return 6;
+                          if (status.includes("Ign")) return 5;
+                          if (status.includes("Dis")) return 4;
+                          if (status.includes("Drn")) return 3;
+                          if (status.includes("Ok")) return 2;
+                          if (status.includes("Init")) return 1;
+                          return 99; // Unknown state
+                      }
+                      
+                      return mapStatusToNumber(value);
+              master_item:
+                key: apache.balancer.parsed
+              tags:
+                - tag: balancer
+                  value: '{#BALANCER}'
+                - tag: component
+                  value: apache
+                - tag: component
+                  value: worker
+              trigger_prototypes:
+                - uuid: 502ed76229f947a795eae562f6d8edf3
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","4")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state DISabled'
+                  priority: INFO
+                  dependencies:
+                    - name: '{#BALANCER} route {#ROUTE} state IGNored'
+                      expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","5")>=3'
+                      recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 71937f05d14642d0a20a604e7b47ed88
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","3")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state DRaiNing'
+                  priority: INFO
+                  dependencies:
+                    - name: '{#BALANCER} route {#ROUTE} state DISabled'
+                      expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","4")>=3'
+                      recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: c03414d7ee764441a1a47daa3fcab92b
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","8")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state ERRor'
+                  priority: HIGH
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 25935f1e2b104947985971572f1a4352
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","5")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state IGNored'
+                  priority: WARNING
+                  dependencies:
+                    - name: '{#BALANCER} route {#ROUTE} state STOP'
+                      expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","6")>=3'
+                      recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 8c92c3e7f3064fe1bd23b89663d4aa7f
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","7")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state SICK'
+                  priority: HIGH
+                  dependencies:
+                    - name: '{#BALANCER} route {#ROUTE} state ERRor'
+                      expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","8")>=3'
+                      recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 6e902c57a52b403aaacad38b29bf4cb6
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","6")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state STOP'
+                  priority: AVERAGE
+                  dependencies:
+                    - name: '{#BALANCER} route {#ROUTE} state SICK'
+                      expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","7")>=3'
+                      recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 68b71ec327b3440b9ea09834e56cfb75
+                  expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],3m,"eq","99")>=3'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'count(/Apache Balancer/apache.worker.status[{#BALANCER},{#ROUTE}],2m,"eq","2")>=2'
+                  name: '{#BALANCER} route {#ROUTE} state UNKnown'
+                  priority: INFO
+                  tags:
+                    - tag: scope
+                      value: availability
+          master_item:
+            key: apache.balancer.parsed
+          lld_macro_paths:
+            - lld_macro: '{#BALANCER}'
+              path: $.balancer
+            - lld_macro: '{#BUSY}'
+              path: $.busy
+            - lld_macro: '{#LOAD}'
+              path: $.load
+            - lld_macro: '{#ROUTE}'
+              path: $.route
+            - lld_macro: '{#STATUS}'
+              path: $.status
+            - lld_macro: '{#WORKER}'
+              path: $.worker
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.data[*]'
+      tags:
+        - tag: class
+          value: software
+        - tag: target
+          value: apache
+      macros:
+        - macro: '{$APACHE.BALANCER.BUSY}'
+          value: '25'
+          description: 'Busy theshold for the trigger'
+        - macro: '{$APACHE.BALANCER.HOST}'
+          value: 127.0.0.1
+          description: 'The hostname or IP address of the Apache status page.'
+        - macro: '{$APACHE.BALANCER.PATH}'
+          value: balancer-manager
+          description: 'The URL path.'
+        - macro: '{$APACHE.BALANCER.PORT}'
+          value: '80'
+          description: 'The port of the Apache status page.'
+        - macro: '{$APACHE.BALANCER.SCHEME}'
+          value: http
+          description: 'The request scheme, which may be either HTTP or HTTPS.'
+      valuemaps:
+        - uuid: 1ba9fab6d8194d72b0b14a7d42146388
+          name: 'Apache Worker Status'
+          mappings:
+            - value: '1'
+              newvalue: Init
+            - value: '2'
+              newvalue: Ok
+            - value: '3'
+              newvalue: Draining
+            - value: '4'
+              newvalue: Disabled
+            - value: '5'
+              newvalue: Ignored
+            - value: '6'
+              newvalue: Stopped
+            - value: '7'
+              newvalue: Sick
+            - value: '8'
+              newvalue: Error
+            - value: '99'
+              newvalue: Unknown
