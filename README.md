@@ -2,6 +2,7 @@ Dunno if it's due to my lack of knowledge but there is nothing that integrates c
 
 This works with Zabbix agent and localhost/127.0.0.1 requests. Everything is configured inside the template.
 On the apache side, just allow manager page from local:
+```
         <Location /balancer-manager>
                 SetHandler balancer-manager
                 Order Allow,Deny
@@ -9,3 +10,4 @@ On the apache side, just allow manager page from local:
                 Allow from 127.0.0.1
                 ...
         </Location>
+```
